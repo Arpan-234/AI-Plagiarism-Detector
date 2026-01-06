@@ -1,228 +1,248 @@
-"""Streamlit AI Plagiarism Detector Application"""
+"""AI Plagiarism & AI Content Detector - Streamlit App"""
 import streamlit as st
-import requests
-import json
-import pandas as pd
-import plotly.graph_objects as go
-import plotly.express as px
+import re
+import math
+from collections import Counter
+from difflib import SequenceMatcher
 from datetime import datetime
-from io import BytesIO
-import base64
-from backend import analyze_text
 
-# Import backend plagiarism detection functions
+# ============== PLAGIARISM DETECTION FUNCTIONS ==============
 
-# Page Configuration
+def tokenize_text(text):
+    """Tokenize text into words"""
+    return re.findall(r'\b\w+\b', text.lower())
+
+def get_sentences(text):
+    """Split text into sentences"""
+    sentences = re.split(r'[.!?]+', text)
+    return [s.strip() for s in sentences if s.strip()]
+
+def get_ngrams(tokens, n=3):
+    """Generate n-grams from tokens"""
+    return [tuple(tokens[i:i+n]) for i in range(len(tokens)-n+1)]
+
+def cosine_similarity(text1, text2):
+    """Calculate cosine similarity"""
+    tokens1 = tokenize_text(text1)
+    tokens2 = tokenize_text(text2)
+    
+    vocab = set(tokens1 + tokens2)
+    vec1 = [tokens1.count(word) for word in vocab]
+    vec2 = [tokens2.count(word) for word in vocab]
+    
+    dot_product = sum(a*b for a, b in zip(vec1, vec2))
+    mag1 = math.sqrt(sum(a*a for a in vec1))
+    mag2 = math.sqrt(sum(b*b for b in vec2))
+    
+    if mag1 == 0 or mag2 == 0:
+        return 0.0
+    return dot_product / (mag1 * mag2)
+
+def jaccard_similarity(text1, text2):
+    """Calculate Jaccard similarity"""
+    tokens1 = set(tokenize_text(text1))
+    tokens2 = set(tokenize_text(text2))
+    
+    intersection = tokens1.intersection(tokens2)
+    union = tokens1.union(tokens2)
+    
+    if len(union) == 0:
+        return 0.0
+    return len(intersection) / len(union)
+
+def sequence_similarity(text1, text2):
+    """Calculate sequence similarity"""
+    return SequenceMatcher(None, text1, text2).ratio()
+
+def ngram_similarity(text1, text2, n=3):
+    """Calculate n-gram similarity"""
+    tokens1 = tokenize_text(text1)
+    tokens2 = tokenize_text(text2)
+    
+    ngrams1 = set(get_ngrams(tokens1, n))
+    ngrams2 = set(get_ngrams(tokens2, n))
+    
+    if len(ngrams1) == 0:
+        return 0.0
+    overlap = len(ngrams1.intersection(ngrams2))
+    return overlap / len(ngrams1)
+
+def detect_plagiarism(original_text, submitted_text):
+    """Detect plagiarism with multiple algorithms"""
+    cosine = cosine_similarity(original_text, submitted_text)
+    jaccard = jaccard_similarity(original_text, submitted_text)
+    sequence = sequence_similarity(original_text, submitted_text)
+    ngram = ngram_similarity(original_text, submitted_text)
+    
+    overall = (cosine * 0.3 + jaccard * 0.2 + sequence * 0.3 + ngram * 0.2) * 100
+    
+    return {
+        'overall_similarity': round(overall, 2),
+        'cosine_similarity': round(cosine * 100, 2),
+        'jaccard_similarity': round(jaccard * 100, 2),
+        'sequence_similarity': round(sequence * 100, 2),
+        'ngram_similarity': round(ngram * 100, 2),
+        'is_plagiarized': overall > 50,
+        'severity': 'critical' if overall > 75 else 'high' if overall > 60 else 'moderate' if overall > 40 else 'low'
+    }
+
+def detect_ai_content(text):
+    """Detect AI-generated content"""
+    sentences = get_sentences(text)
+    if len(sentences) < 2:
+        ai_prob = 25.0
+    else:
+        word_counts = [len(tokenize_text(s)) for s in sentences]
+        avg = sum(word_counts) / len(word_counts) if word_counts else 0
+        variance = sum((x - avg) ** 2 for x in word_counts) / len(word_counts) if word_counts else 0
+        perplexity = variance ** 0.5 if variance > 0 else 0
+        
+        complexities = []
+        for sentence in sentences:
+            tokens = tokenize_text(sentence)
+            if tokens:
+                unique_ratio = len(set(tokens)) / len(tokens)
+                complexities.append(unique_ratio)
+        
+        burstiness = sum(complexities) / len(complexities) if complexities else 0
+        ai_prob = min(100, max(0, (perplexity * 15 + burstiness * 35)))
+    
+    return {
+        'ai_probability': round(ai_prob, 1),
+        'confidence_level': 'High' if ai_prob > 70 else 'Medium' if ai_prob > 40 else 'Low',
+        'classification': 'AI-Generated' if ai_prob > 60 else 'Human-Written'
+    }
+
+# ============== STREAMLIT APP ==============
+
 st.set_page_config(
     page_title="AI Plagiarism Detector",
     page_icon="🔍",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# Session State Initialization
-if 'analysis_history' not in st.session_state:
-    st.session_state.analysis_history = []
-if 'current_report' not in st.session_state:
-    st.session_state.current_report = None
-if 'backend_url' not in st.session_state:
-    st.session_state.backend_url = "http://localhost:5000"
-
-# Custom CSS Styling
 st.markdown("""
-    <style>
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1.5rem;
-        border-radius: 10px;
-        color: white;
-        text-align: center;
-        margin: 1rem 0;
-    }
-    .warning-card {
-        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-        padding: 1.5rem;
-        border-radius: 10px;
-        color: white;
-        margin: 1rem 0;
-    }
-    .success-card {
-        background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-        padding: 1.5rem;
-        border-radius: 10px;
-        color: white;
-        margin: 1rem 0;
-    }
-    </style>
+<style>
+.main { padding: 2rem; }
+.header-card {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    padding: 2rem;
+    border-radius: 15px;
+    color: white;
+    text-align: center;
+    margin-bottom: 2rem;
+}
+.metric-box {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    padding: 1.5rem;
+    border-radius: 10px;
+    color: white;
+    text-align: center;
+    margin: 1rem 0;
+}
+</style>
 """, unsafe_allow_html=True)
 
-# Sidebar Configuration
-with st.sidebar:
-    st.title("🔍 AI Plagiarism Detector")
-    st.markdown("---")
-    st.markdown("### How to Use")
-    st.info("1. Upload a document (PDF, DOCX, TXT)\n2. Enter comparison text\n3. Click Analyze\n4. View detailed results")
-    st.markdown("---")
-    
-    backend_url = st.text_input(
-        "Backend URL",
-        value=st.session_state.backend_url,
-        help="Enter the backend server URL"
-    )
-    st.session_state.backend_url = backend_url
-
-# Main Header
 st.markdown("""
-    <div class="metric-card">
-        <h1>🎓 AI Plagiarism & Content Detector</h1>
-        <p>Detect plagiarism and AI-generated content with advanced algorithms</p>
-    </div>
+<div class="header-card">
+    <h1>🎓 AI Plagiarism & Content Detector</h1>
+    <p>Detect plagiarism and AI-generated content with advanced algorithms</p>
+</div>
 """, unsafe_allow_html=True)
 
-# Main Content Area
-col1, col2 = st.columns([2, 1])
+# Input section
+col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("📤 Upload Document")
-    uploaded_file = st.file_uploader(
-        "Choose a file",
-        type=["pdf", "docx", "txt"],
-        help="Upload PDF, DOCX, or TXT files"
+    st.subheader("📝 Your Content")
+    submitted_text = st.text_area(
+        "Paste text to analyze",
+        height=200,
+        placeholder="Enter the text you want to check for plagiarism and AI content..."
     )
 
 with col2:
-    st.subheader("📝 Comparison Text")
+    st.subheader("📚 Source/Comparison")
     comparison_text = st.text_area(
-        "Enter original text to compare",
-        height=150,
-        placeholder="Paste the original text here..."
+        "Paste source/original text (optional)",
+        height=200,
+        placeholder="Enter source text to compare against..."
     )
 
-# Analysis Button and Results
-if st.button("🔍 Analyze Document", use_container_width=True):
-    if uploaded_file and comparison_text:
-        with st.spinner("Analyzing... Please wait..."):
-            try:
-                files = {'file': uploaded_file}
-                data = {'comparison_text': comparison_text}
-                
-                response = requests.post(
-                    f"{st.session_state.backend_url}/api/analyze",
-                    files=files,
-                    data=data,
-                    timeout=30
-                )
-                
-                if response.status_code == 200:
-                    report = response.json()
-                    st.session_state.current_report = report
-                    st.session_state.analysis_history.append({
-                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        'file': uploaded_file.name,
-                        'report': report
-                    })
-                    st.success("✅ Analysis complete!")
-                else:
-                    st.error(f"❌ Error: {response.text}")
-            except Exception as e:
-                st.error(f"❌ Connection error: {str(e)}")
+# Analysis button
+if st.button("🔍 Analyze Now", use_container_width=True):
+    if not submitted_text:
+        st.error("Please enter text to analyze")
     else:
-        st.warning("⚠️ Please upload a file and enter comparison text")
-
-# Display Results
-if st.session_state.current_report:
-    report = st.session_state.current_report
-    
-    # Create tabs for different views
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Results", "📈 Metrics", "📋 Details", "📥 Download"])
-    
-    with tab1:
-        st.subheader("Analysis Results")
-        
-        # Display Plagiarism Detection
-        if 'plagiarism_analysis' in report:
-            plag = report['plagiarism_analysis']
-            col1, col2, col3 = st.columns(3)
+        with st.spinner("Analyzing..."):
+            compare_text = comparison_text if comparison_text else submitted_text
             
-            with col1:
-                severity = plag.get('severity', 'unknown')
-                st.metric("Severity", severity.upper())
+            # Run analysis
+            plag_results = detect_plagiarism(compare_text, submitted_text)
+            ai_results = detect_ai_content(submitted_text)
             
-            with col2:
-                similarity = plag.get('overall_similarity', 0)
-                st.metric("Overall Similarity", f"{similarity}%")
+            # Display results in tabs
+            tab1, tab2, tab3, tab4 = st.tabs(["📊 Results", "📈 Metrics", "💭 Suggestions", "📥 Download"])
             
-            with col3:
-                is_plagiarized = "🚨 Yes" if plag.get('is_plagiarized') else "✅ No"
-                st.metric("Plagiarized", is_plagiarized)
-        
-        # Display AI Detection
-        if 'ai_analysis' in report:
-            ai = report['ai_analysis']
-            st.markdown("""<div class="warning-card">
-                <h3>🤖 AI-Generated Content Detection</h3>
-            </div>""", unsafe_allow_html=True)
+            with tab1:
+                st.subheader("Analysis Results")
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Plagiarism Severity", plag_results['severity'].upper())
+                with col2:
+                    st.metric("Similarity %", f"{plag_results['overall_similarity']}%")
+                with col3:
+                    status = "🚨 PLAGIARIZED" if plag_results['is_plagiarized'] else "✅ ORIGINAL"
+                    st.markdown(f"<div class='metric-box'>{status}</div>", unsafe_allow_html=True)
+                
+                st.markdown("---")
+                st.subheader("🤖 AI Content Detection")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("AI Probability", f"{ai_results['ai_probability']}%")
+                with col2:
+                    st.metric("Confidence", ai_results['confidence_level'])
+                with col3:
+                    st.metric("Classification", ai_results['classification'])
             
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("AI Probability", f"{ai.get('ai_probability', 0)}%")
-            with col2:
-                st.metric("Confidence", ai.get('confidence_level', 'N/A'))
-            with col3:
-                st.metric("Classification", ai.get('classification', 'N/A'))
-    
-    with tab2:
-        st.subheader("Similarity Metrics")
-        
-        if 'plagiarism_analysis' in report:
-            plag = report['plagiarism_analysis']
-            metrics = {
-                'Overall': plag.get('overall_similarity', 0),
-                'Cosine': plag.get('cosine_similarity', 0),
-                'Jaccard': plag.get('jaccard_similarity', 0),
-                'Sequence': plag.get('sequence_similarity', 0),
-                'N-gram': plag.get('ngram_similarity', 0)
-            }
+            with tab2:
+                st.subheader("Similarity Metrics")
+                st.write(f"**Cosine Similarity:** {plag_results['cosine_similarity']}%")
+                st.write(f"**Jaccard Similarity:** {plag_results['jaccard_similarity']}%")
+                st.write(f"**Sequence Similarity:** {plag_results['sequence_similarity']}%")
+                st.write(f"**N-gram Similarity:** {plag_results['ngram_similarity']}%")
             
-            df = pd.DataFrame(list(metrics.items()), columns=['Metric', 'Similarity (%)'])
-            fig = px.bar(df, x='Metric', y='Similarity (%)',
-                        color='Similarity (%)',
-                        color_continuous_scale=['#4caf50', '#ff9800', '#f44336'],
-                        text='Similarity (%)')
-            st.plotly_chart(fig, use_container_width=True)
-    
-    with tab3:
-        st.subheader("Detailed Analysis")
-        st.json(report)
-    
-    with tab4:
-        st.subheader("Download Results")
-        
-        # Download as JSON
-        json_str = json.dumps(report, indent=2)
-        st.download_button(
-            label="📥 Download as JSON",
-            data=json_str,
-            file_name="analysis_report.json",
-            mime="application/json"
-        )
-        
-        # Download as CSV
-        if 'plagiarism_analysis' in report:
-            plag = report['plagiarism_analysis']
-            csv_data = pd.DataFrame([plag]).to_csv(index=False)
-            st.download_button(
-                label="📥 Download as CSV",
-                data=csv_data,
-                file_name="analysis_report.csv",
-                mime="text/csv"
-            )
-
-# Display Analysis History
-if st.session_state.analysis_history:
-    with st.expander("📜 Analysis History"):
-        for i, item in enumerate(st.session_state.analysis_history, 1):
-            st.write(f"{i}. **{item['file']}** - {item['timestamp']}")
+            with tab3:
+                st.subheader("💡 Improvement Suggestions")
+                if plag_results['overall_similarity'] > 50:
+                    st.warning("⚠️ High plagiarism detected. Consider rewriting the content.")
+                if ai_results['ai_probability'] > 60:
+                    st.info("🤖 AI-generated content detected. Add more personal insights.")
+                st.markdown("""
+                **Best Practices:**
+                1. Use original content and write in your own words
+                2. Cite sources properly with quotation marks
+                3. Paraphrase and add your own analysis
+                4. If using AI, disclose and add human perspective
+                5. Review and proofread before submission
+                """)
+            
+            with tab4:
+                st.subheader("📥 Download Results")
+                import json
+                results = {
+                    'timestamp': datetime.now().isoformat(),
+                    'plagiarism': plag_results,
+                    'ai_detection': ai_results
+                }
+                json_str = json.dumps(results, indent=2)
+                st.download_button(
+                    "Download JSON Report",
+                    data=json_str,
+                    file_name=f"plagiarism_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json"
+                )
 
 st.markdown("---")
 st.markdown("<p style='text-align: center; color: gray;'>© 2024 AI Plagiarism Detector | Powered by Streamlit</p>", unsafe_allow_html=True)
