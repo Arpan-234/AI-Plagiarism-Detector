@@ -8,6 +8,9 @@ import plotly.express as px
 from datetime import datetime
 from io import BytesIO
 import base64
+from backend import analyze_text
+
+# Import backend plagiarism detection functions
 
 # Page Configuration
 st.set_page_config(
